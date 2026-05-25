@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<!--
+  Per-tenant wrapper site. Lives on the association's own domain
+  (e.g. certify.stibc.org, verify.atio.on.ca) via GitHub Pages + CNAME.
+  Iframes portal.lynxseal.com, holds the auth token in this-origin
+  localStorage, and proxies postMessages between the iframe and the
+  outer browser (URL bar + back/forward) so the inner SPA behaves like
+  a normal site.
+
+  Customize the CONFIG block at the top for each deployment.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STIBC Verify Translation</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#fff; }
+  iframe#portal { width:100%; height:100%; border:0; display:block; }
+  /* Visible only before the iframe handshake completes. */
+  #boot { display:flex; align-items:center; justify-content:center; height:100%; font:14px system-ui,sans-serif; color:#666; }
+</style>
+</head>
+<body>
+<div id="boot">Loading…</div>
+<iframe id="portal" title="STIBC Verify Translation" style="display:none"
+  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin"
+  referrerpolicy="origin"></iframe>
+
+<script>
+// === CONFIG (override per deployment) =====================================
+const CONFIG = window.WRAPPER_CONFIG || {
+  // Tenant identifier — sent to the API in the X-Tenant header and used by
+  // the portal to resolve association-specific behavior.
+  tenant: 'STIBC',
+  // Display name appended to the browser tab title — portal sends generic
+  // page names ("Sign In", "Certify a Translation") via the setTitle
+  // postMessage; we format as "<page> · <orgName>" for the tab.
+  orgName: 'STIBC',
+  // Which portal app to load on first paint: 'certify' (signing flow) or
+  // 'verify' (document verification page).
+  app: 'verify',
+  // The portal origin. Iframe src and postMessage targetOrigin both use this.
+  portalOrigin: 'https://portal.lynxseal.com',
+  // Storage key for the auth token. Per-wrapper so STIBC + ATIO logins are
+  // independent (different domains have different localStorage anyway, but
+  // this is explicit).
+  authStorageKey: 'lynxseal:authToken',
+};
+// =========================================================================
+
+const PORTAL_ORIGIN = CONFIG.portalOrigin;
+const STORAGE_KEY = CONFIG.authStorageKey;
+
+function getToken() { try { return localStorage.getItem(STORAGE_KEY); } catch { return null; } }
+function setToken(t) {
+  try {
+    if (t) localStorage.setItem(STORAGE_KEY, t);
+    else localStorage.removeItem(STORAGE_KEY);
+  } catch {}
+}
+
+// Build initial iframe src. The portal's per-app routing is by HTML filename
+// so we point at the right one. Once it loads, we'll send {type:'init'} via
+// postMessage with token + tenant.
+function initialPath() {
+  switch (CONFIG.app) {
+    case 'verify':  return '/verify-document.html';
+    default:        return '/index.html';
+  }
+}
+
+const iframe = document.getElementById('portal');
+const initialUrl = new URL(initialPath() + location.search + location.hash, PORTAL_ORIGIN);
+iframe.src = initialUrl.toString();
+
+// === Inbound postMessage from portal iframe ===============================
+window.addEventListener('message', (e) => {
+  // Strict: only accept from our portal origin AND only from our iframe.
+  if (e.origin !== PORTAL_ORIGIN) return;
+  if (e.source !== iframe.contentWindow) return;
+  const m = e.data;
+  if (!m || typeof m !== 'object') return;
+  switch (m.type) {
+    case 'init':
+      // Portal asked for state; send token + tenant + app.
+      iframe.contentWindow.postMessage({
+        type: 'init',
+        token: getToken(),
+        tenant: CONFIG.tenant,
+        app: CONFIG.app,
+      }, PORTAL_ORIGIN);
+      iframe.style.display = 'block';
+      document.getElementById('boot').remove();
+      break;
+    case 'setAuth':
+      setToken(m.token);
+      // Notify any other tabs of this wrapper origin that auth changed.
+      // (BroadcastChannel works same-origin only — exactly what we want.)
+      try {
+        const bc = new BroadcastChannel('lynxseal:auth');
+        bc.postMessage({ token: m.token });
+        bc.close();
+      } catch {}
+      break;
+    case 'clearAuth':
+      setToken(null);
+      try {
+        const bc = new BroadcastChannel('lynxseal:auth');
+        bc.postMessage({ token: null });
+        bc.close();
+      } catch {}
+      break;
+    case 'setTitle':
+      // Portal pushes its <title> (just the page name, no branding).
+      // We tack on our org name so the browser tab reads e.g. "Sign In · STIBC".
+      document.title = (m.title ? m.title + ' · ' : '') + CONFIG.orgName;
+      break;
+    case 'navigate':
+      // Inner SPA navigated. Update our URL bar so back/forward works.
+      // Strip the portal origin if it leaked in.
+      let path = String(m.path || '/');
+      if (path.startsWith(PORTAL_ORIGIN)) path = path.substring(PORTAL_ORIGIN.length);
+      const wrapperUrl = location.pathname + (path.startsWith('?') || path.startsWith('#') ? path : (path === '/' ? '' : path));
+      history.pushState({ portalPath: path }, '', wrapperUrl);
+      break;
+  }
+});
+
+// === Outbound: tell portal when user clicks browser back/forward ==========
+window.addEventListener('popstate', (e) => {
+  const path = (e.state && e.state.portalPath) || '/';
+  iframe.contentWindow.postMessage({ type: 'popstate', path }, PORTAL_ORIGIN);
+});
+
+// === Multi-tab auth sync ==================================================
+// If the user signs out in another tab of the same wrapper origin, push the
+// change through to the iframe so it doesn't keep showing authenticated UI.
+try {
+  const bc = new BroadcastChannel('lynxseal:auth');
+  bc.addEventListener('message', (e) => {
+    iframe.contentWindow.postMessage({ type: 'authChanged', token: e.data.token }, PORTAL_ORIGIN);
+  });
+} catch {}
+</script>
+</body>
+</html>
