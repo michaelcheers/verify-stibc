@@ -75,14 +75,30 @@ function setToken(t) {
   } catch {}
 }
 
-// Build initial iframe src. The portal's per-app routing is by HTML filename
-// so we point at the right one. Once it loads, we'll send {type:'init'} via
-// postMessage with token + tenant.
+// Build initial iframe src. This file is also served by GitHub Pages as
+// the 404 fallback for arbitrary paths (refresh on /reset-password etc.),
+// so honor location.pathname when it's not the root — that way a refresh
+// lands back on the same portal page instead of resetting to the app default.
 function initialPath() {
-  switch (CONFIG.app) {
-    case 'verify':  return '/verify-document.html';
-    default:        return '/index.html';
+  const p = location.pathname;
+  if (p === '/' || p === '' || p === '/index.html') {
+    return CONFIG.app === 'verify' ? '/verify-document.html' : '/index.html';
   }
+  return p.endsWith('.html') ? p : p + '.html';
+}
+
+// iframe is on `<app-default>.html` or another portal route; map back to the
+// pretty wrapper URL: strip `.html`, collapse the wrapper's default app to '/'.
+function iframePathToWrapperUrl(p) {
+  if (!p) return '/';
+  if (p.startsWith(PORTAL_ORIGIN)) p = p.substring(PORTAL_ORIGIN.length);
+  // Default app routes back to root.
+  const defaultPath = CONFIG.app === 'verify' ? '/verify-document.html' : '/index.html';
+  // Match either "<defaultPath>" exactly, or "<defaultPath>?..." / "<defaultPath>#..."
+  if (p === defaultPath || p.startsWith(defaultPath + '?') || p.startsWith(defaultPath + '#')) {
+    return '/' + p.substring(defaultPath.length);
+  }
+  return p.replace(/\.html(?=[?#]|$)/, '');
 }
 
 const iframe = document.getElementById('portal');
@@ -107,6 +123,16 @@ window.addEventListener('message', (e) => {
       }, PORTAL_ORIGIN);
       iframe.style.display = 'block';
       document.getElementById('boot')?.remove();
+      // Sync URL bar to whatever path the iframe is on. Each inner-page
+      // navigation is a fresh load that re-runs portal-bridge and re-sends
+      // init with the new path; replaceState (not push) keeps history flat
+      // since the iframe nav itself already created a history entry.
+      if (m.path) {
+        const wrapperUrl = iframePathToWrapperUrl(m.path);
+        if (wrapperUrl !== location.pathname + location.search + location.hash) {
+          history.replaceState({ portalPath: m.path }, '', wrapperUrl);
+        }
+      }
       break;
     case 'setAuth':
       setToken(m.token);
@@ -131,14 +157,13 @@ window.addEventListener('message', (e) => {
       // We tack on our org name so the browser tab reads e.g. "Sign In · STIBC".
       document.title = (m.title ? m.title + ' · ' : '') + CONFIG.orgName;
       break;
-    case 'navigate':
-      // Inner SPA navigated. Update our URL bar so back/forward works.
-      // Strip the portal origin if it leaked in.
-      let path = String(m.path || '/');
-      if (path.startsWith(PORTAL_ORIGIN)) path = path.substring(PORTAL_ORIGIN.length);
-      const wrapperUrl = location.pathname + (path.startsWith('?') || path.startsWith('#') ? path : (path === '/' ? '' : path));
-      history.pushState({ portalPath: path }, '', wrapperUrl);
+    case 'navigate': {
+      // Explicit nav from inside the iframe (PortalBridge.navigate(path)).
+      // Add a history entry on the outer so browser back works.
+      const wrapperUrl = iframePathToWrapperUrl(String(m.path || '/'));
+      history.pushState({ portalPath: m.path }, '', wrapperUrl);
       break;
+    }
   }
 });
 
