@@ -106,7 +106,7 @@ window.addEventListener('message', (e) => {
         app: CONFIG.app,
       }, PORTAL_ORIGIN);
       iframe.style.display = 'block';
-      document.getElementById('boot').remove();
+      document.getElementById('boot')?.remove();
       break;
     case 'setAuth':
       setToken(m.token);
