@@ -1,187 +1,52 @@
 <!DOCTYPE html>
 <!--
-  Per-tenant wrapper site. Lives on the association's own domain
-  (e.g. certify.stibc.org, verify.atio.on.ca) via GitHub Pages + CNAME.
-  Iframes portal.lynxseal.com, holds the auth token in this-origin
-  localStorage, and proxies postMessages between the iframe and the
-  outer browser (URL bar + back/forward) so the inner SPA behaves like
-  a normal site.
+  GitHub Pages 404 fallback — served for every path on this wrapper origin
+  until the service worker installs. Once /sw.js is registered and active,
+  every subsequent request gets intercepted and proxied to portal.lynxseal.com
+  with the STIBC header injected; this bootstrap HTML never renders again.
 
-  Customize the CONFIG block at the top for each deployment.
+  No iframe, no postMessage — the SW makes the portal appear same-origin.
 -->
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>STIBC Verify Translation</title>
+<title>Loading STIBC…</title>
 <link rel="icon" href="/favicon.ico">
 <style>
   html, body { margin:0; padding:0; height:100%; background:#fff; font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
-  body { display:flex; flex-direction:column; }
-  /* STIBC-branded header sits OUTSIDE the iframe so users see the
-     association's branding in the wrapper origin's URL bar. The portal
-     iframe is just the form content underneath. */
-  header { border-bottom:1px solid #ddd; padding:1rem; display:flex; align-items:center; gap:1rem; flex-shrink:0; }
-  header .brand { display:inline-block; }
-  header .brand img { display:block; max-width:288px; height:auto; }
-  header .nav { display:flex; gap:1rem; }
-  header .nav a { color:#212529; text-decoration:none; font-weight:500; }
-  header .nav a:hover { color:#000; text-decoration:underline; }
-  iframe#portal { flex:1; width:100%; border:0; display:block; }
-  /* Visible only before the iframe handshake completes. */
-  #boot { display:flex; align-items:center; justify-content:center; flex:1; color:#666; }
+  body { display:flex; align-items:center; justify-content:center; color:#666; }
 </style>
 </head>
 <body>
-<header>
-  <a class="brand" href="https://stibc.org"><img alt="STIBC logo" src="/stibc-logo.png" width="288" height="130"></a>
-  <nav class="nav"><a href="https://stibc.org">&lt; BACK TO MAIN SITE</a></nav>
-</header>
-<div id="boot">Loading…</div>
-<iframe id="portal" title="STIBC Verify Translation" style="display:none"
-  sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin allow-modals"
-  referrerpolicy="origin"></iframe>
-
+Loading…
 <script>
-// === CONFIG (override per deployment) =====================================
-const CONFIG = window.WRAPPER_CONFIG || {
-  // Tenant identifier — sent to the API in the X-Tenant header and used by
-  // the portal to resolve association-specific behavior.
-  tenant: 'STIBC',
-  // Display name appended to the browser tab title — portal sends generic
-  // page names ("Sign In", "Certify a Translation") via the setTitle
-  // postMessage; we format as "<page> · <orgName>" for the tab.
-  orgName: 'STIBC',
-  // Which portal app to load on first paint: 'certify' (signing flow) or
-  // 'verify' (document verification page).
-  app: 'verify',
-  // The portal origin. Iframe src and postMessage targetOrigin both use this.
-  portalOrigin: 'https://portal.lynxseal.com',
-  // Storage key for the auth token. Per-wrapper so STIBC + ATIO logins are
-  // independent (different domains have different localStorage anyway, but
-  // this is explicit).
-  authStorageKey: 'lynxseal:authToken',
-};
-// =========================================================================
-
-const PORTAL_ORIGIN = CONFIG.portalOrigin;
-const STORAGE_KEY = CONFIG.authStorageKey;
-
-function getToken() { try { return localStorage.getItem(STORAGE_KEY); } catch { return null; } }
-function setToken(t) {
+(async () => {
+  if (!('serviceWorker' in navigator)) {
+    document.body.textContent = 'This site requires a modern browser (service worker support).';
+    return;
+  }
   try {
-    if (t) localStorage.setItem(STORAGE_KEY, t);
-    else localStorage.removeItem(STORAGE_KEY);
-  } catch {}
-}
-
-// Build initial iframe src. This file is also served by GitHub Pages as
-// the 404 fallback for arbitrary paths (refresh on /reset-password etc.),
-// so honor location.pathname when it's not the root — that way a refresh
-// lands back on the same portal page instead of resetting to the app default.
-function initialPath() {
-  const p = location.pathname;
-  if (p === '/' || p === '' || p === '/index.html') {
-    return CONFIG.app === 'verify' ? '/verify-document.html' : '/index.html';
-  }
-  return p.endsWith('.html') ? p : p + '.html';
-}
-
-// iframe is on `<app-default>.html` or another portal route; map back to the
-// pretty wrapper URL: strip `.html`, collapse the wrapper's default app to '/'.
-function iframePathToWrapperUrl(p) {
-  if (!p) return '/';
-  if (p.startsWith(PORTAL_ORIGIN)) p = p.substring(PORTAL_ORIGIN.length);
-  // Default app routes back to root.
-  const defaultPath = CONFIG.app === 'verify' ? '/verify-document.html' : '/index.html';
-  // Match either "<defaultPath>" exactly, or "<defaultPath>?..." / "<defaultPath>#..."
-  if (p === defaultPath || p.startsWith(defaultPath + '?') || p.startsWith(defaultPath + '#')) {
-    return '/' + p.substring(defaultPath.length);
-  }
-  return p.replace(/\.html(?=[?#]|$)/, '');
-}
-
-const iframe = document.getElementById('portal');
-const initialUrl = new URL(initialPath() + location.search + location.hash, PORTAL_ORIGIN);
-iframe.src = initialUrl.toString();
-
-// === Inbound postMessage from portal iframe ===============================
-window.addEventListener('message', (e) => {
-  // Strict: only accept from our portal origin AND only from our iframe.
-  if (e.origin !== PORTAL_ORIGIN) return;
-  if (e.source !== iframe.contentWindow) return;
-  const m = e.data;
-  if (!m || typeof m !== 'object') return;
-  switch (m.type) {
-    case 'init':
-      // Portal asked for state; send token + tenant + app.
-      iframe.contentWindow.postMessage({
-        type: 'init',
-        token: getToken(),
-        tenant: CONFIG.tenant,
-        app: CONFIG.app,
-      }, PORTAL_ORIGIN);
-      iframe.style.display = 'block';
-      document.getElementById('boot')?.remove();
-      // Sync URL bar to whatever path the iframe is on. Each inner-page
-      // navigation is a fresh load that re-runs portal-bridge and re-sends
-      // init with the new path; replaceState (not push) keeps history flat
-      // since the iframe nav itself already created a history entry.
-      if (m.path) {
-        const wrapperUrl = iframePathToWrapperUrl(m.path);
-        if (wrapperUrl !== location.pathname + location.search + location.hash) {
-          history.replaceState({ portalPath: m.path }, '', wrapperUrl);
-        }
-      }
-      break;
-    case 'setAuth':
-      setToken(m.token);
-      // Notify any other tabs of this wrapper origin that auth changed.
-      // (BroadcastChannel works same-origin only — exactly what we want.)
-      try {
-        const bc = new BroadcastChannel('lynxseal:auth');
-        bc.postMessage({ token: m.token });
-        bc.close();
-      } catch {}
-      break;
-    case 'clearAuth':
-      setToken(null);
-      try {
-        const bc = new BroadcastChannel('lynxseal:auth');
-        bc.postMessage({ token: null });
-        bc.close();
-      } catch {}
-      break;
-    case 'setTitle':
-      // Portal pushes its <title> (just the page name, no branding).
-      // We tack on our org name so the browser tab reads e.g. "Sign In · STIBC".
-      document.title = (m.title ? m.title + ' · ' : '') + CONFIG.orgName;
-      break;
-    case 'navigate': {
-      // Explicit nav from inside the iframe (PortalBridge.navigate(path)).
-      // Add a history entry on the outer so browser back works.
-      const wrapperUrl = iframePathToWrapperUrl(String(m.path || '/'));
-      history.pushState({ portalPath: m.path }, '', wrapperUrl);
-      break;
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    // If the SW is already active (returning visitor), reload now so the
+    // current navigation gets intercepted. If it's still installing, wait
+    // for activation then reload.
+    if (reg.active) {
+      location.reload();
+      return;
     }
+    const sw = reg.installing || reg.waiting;
+    if (!sw) {
+      document.body.textContent = 'SW registered but has no installing/waiting worker.';
+      return;
+    }
+    sw.addEventListener('statechange', () => {
+      if (sw.state === 'activated') location.reload();
+    });
+  } catch (e) {
+    document.body.textContent = 'Failed to register service worker: ' + (e && e.message || e);
   }
-});
-
-// === Outbound: tell portal when user clicks browser back/forward ==========
-window.addEventListener('popstate', (e) => {
-  const path = (e.state && e.state.portalPath) || '/';
-  iframe.contentWindow.postMessage({ type: 'popstate', path }, PORTAL_ORIGIN);
-});
-
-// === Multi-tab auth sync ==================================================
-// If the user signs out in another tab of the same wrapper origin, push the
-// change through to the iframe so it doesn't keep showing authenticated UI.
-try {
-  const bc = new BroadcastChannel('lynxseal:auth');
-  bc.addEventListener('message', (e) => {
-    iframe.contentWindow.postMessage({ type: 'authChanged', token: e.data.token }, PORTAL_ORIGIN);
-  });
-} catch {}
+})();
 </script>
 </body>
 </html>
