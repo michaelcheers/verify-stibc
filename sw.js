@@ -29,10 +29,26 @@ const LOCAL_PATHS = new Set([
 self.addEventListener('install', (e) => { e.waitUntil(self.skipWaiting()); });
 self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
 
+// Virtual path: the SW synthesizes this JS file containing the tenant
+// globals (window.TENANT, etc.). Injected into <head> as a <script src>
+// so it doesn't require 'unsafe-inline' in the page's CSP, and runs
+// before portal-bridge.js / api.js (which read those globals).
+const TENANT_GLOBALS_PATH = '/__tenant-globals.js';
+
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return; // cross-origin → not our problem
   if (LOCAL_PATHS.has(url.pathname)) return;       // local-only → pass through to GH Pages
+
+  if (url.pathname === TENANT_GLOBALS_PATH) {
+    event.respondWith(new Response(
+      'window.TENANT=' + JSON.stringify(TENANT) +
+      ';window.WRAPPER_APP=' + JSON.stringify(APP) +
+      ';window.ORG_NAME=' + JSON.stringify(ORG_NAME) + ';',
+      { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } }
+    ));
+    return;
+  }
 
   event.respondWith(handleRequest(event.request, url));
 });
@@ -69,10 +85,14 @@ async function handleRequest(request, url) {
   const headers = new Headers(upstream.headers);
 
   if (contentType.includes('text/html')) {
-    const text = await upstream.text();
-    const wrapped = text.replace(/<body([^>]*)>/i, '<body$1>' + HEADER_HTML);
+    let text = await upstream.text();
+    // tenant globals script in <head>, BEFORE any portal script — they read
+    // window.TENANT/ORG_NAME during initial execution.
+    text = text.replace(/<head([^>]*)>/i, '<head$1><script src="' + TENANT_GLOBALS_PATH + '"></script>');
+    // visual header in <body>.
+    text = text.replace(/<body([^>]*)>/i, '<body$1>' + HEADER_HTML);
     headers.set('Content-Type', 'text/html; charset=utf-8');
-    return new Response(wrapped, { status: upstream.status, statusText: upstream.statusText, headers });
+    return new Response(text, { status: upstream.status, statusText: upstream.statusText, headers });
   }
 
   // Non-HTML: still wrap in a fresh Response so .url doesn't leak portal origin.
@@ -80,10 +100,9 @@ async function handleRequest(request, url) {
   return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
-// Header markup spliced into every HTML response. Includes a small <script>
-// that exposes the tenant identity to portal scripts (api.js reads
-// window.TENANT for the X-Tenant request header, etc.) — no postMessage
-// handshake needed since we're same-origin.
+// Visual header markup spliced after <body>. Tenant identity globals go in
+// a separate /__tenant-globals.js virtual script injected into <head> so
+// inline-script CSP doesn't have to be relaxed for the page.
 const HEADER_HTML = `
 <header style="border-bottom:1px solid #ddd;padding:1rem;display:flex;align-items:center;gap:1rem;flex-shrink:0;background:#fff">
   <a href="https://stibc.org" style="display:inline-block">
@@ -93,9 +112,4 @@ const HEADER_HTML = `
     <a href="https://stibc.org" style="color:#212529;text-decoration:none;font-weight:500">&lt; BACK TO MAIN SITE</a>
   </nav>
 </header>
-<script>
-  window.TENANT = ${JSON.stringify(TENANT)};
-  window.WRAPPER_APP = ${JSON.stringify(APP)};
-  window.ORG_NAME = ${JSON.stringify(ORG_NAME)};
-</script>
 `;
