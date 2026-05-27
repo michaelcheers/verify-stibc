@@ -29,11 +29,31 @@ const LOCAL_PATHS = new Set([
 self.addEventListener('install', (e) => { e.waitUntil(self.skipWaiting()); });
 self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
 
-// Virtual path: the SW synthesizes this JS file containing the tenant
-// globals (window.TENANT, etc.). Injected into <head> as a <script src>
-// so it doesn't require 'unsafe-inline' in the page's CSP, and runs
-// before portal-bridge.js / api.js (which read those globals).
+// Virtual path: the SW synthesizes this JS file. Sets tenant globals
+// (window.TENANT, etc.), toggles a body class based on auth state so the
+// nav's login/signout entries can show/hide via CSS, and adds the
+// "this-page" highlight to the current nav link.
 const TENANT_GLOBALS_PATH = '/__tenant-globals.js';
+
+const TENANT_GLOBALS_JS = `
+window.TENANT=${JSON.stringify(TENANT)};
+window.WRAPPER_APP=${JSON.stringify(APP)};
+window.ORG_NAME=${JSON.stringify(ORG_NAME)};
+document.addEventListener('DOMContentLoaded', function () {
+  try {
+    document.body.classList.add(
+      localStorage.getItem('lynxseal:authToken') ? 'lynxseal-auth' : 'lynxseal-anon'
+    );
+  } catch (e) { document.body.classList.add('lynxseal-anon'); }
+  for (var a of document.querySelectorAll('.lynxseal-nav a[href], .lynxseal-nav form[action]')) {
+    var href = a.getAttribute('href') || a.getAttribute('action') || '';
+    var path = location.pathname;
+    if (href === path || (href === '/' && (path === '/' || path === '/index.html'))) {
+      (a.tagName === 'FORM' ? a.parentElement : a).classList.add('this-page');
+    }
+  }
+});
+`;
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
@@ -41,12 +61,9 @@ self.addEventListener('fetch', (event) => {
   if (LOCAL_PATHS.has(url.pathname)) return;       // local-only → pass through to GH Pages
 
   if (url.pathname === TENANT_GLOBALS_PATH) {
-    event.respondWith(new Response(
-      'window.TENANT=' + JSON.stringify(TENANT) +
-      ';window.WRAPPER_APP=' + JSON.stringify(APP) +
-      ';window.ORG_NAME=' + JSON.stringify(ORG_NAME) + ';',
-      { status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' } }
-    ));
+    event.respondWith(new Response(TENANT_GLOBALS_JS, {
+      status: 200, headers: { 'Content-Type': 'text/javascript; charset=utf-8' },
+    }));
     return;
   }
 
@@ -100,16 +117,55 @@ async function handleRequest(request, url) {
   return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
-// Visual header markup spliced after <body>. Tenant identity globals go in
-// a separate /__tenant-globals.js virtual script injected into <head> so
-// inline-script CSP doesn't have to be relaxed for the page.
+// Visual header markup spliced after <body>. Mirrors the legacy
+// _Layout.cshtml STIBC navbar (Bootstrap 4 + custom CSS). Login/signout
+// items get toggled by the body's lynxseal-auth / lynxseal-anon class
+// (set in TENANT_GLOBALS_JS based on localStorage auth token).
 const HEADER_HTML = `
-<header style="border-bottom:1px solid #ddd;padding:1rem;display:flex;align-items:center;gap:1rem;flex-shrink:0;background:#fff">
-  <a href="https://stibc.org" style="display:inline-block">
-    <img alt="STIBC logo" src="/stibc-logo.png" width="288" height="130" style="display:block;max-width:288px;height:auto">
-  </a>
-  <nav style="display:flex;gap:1rem">
-    <a href="https://stibc.org" style="color:#212529;text-decoration:none;font-weight:500">&lt; BACK TO MAIN SITE</a>
+<style>
+  .lynxseal-nav .navbar > .container { flex-direction: column; }
+  .lynxseal-nav .navbar-nav { font-family: Catamaran, Arial, Helvetica, sans-serif !important; }
+  .lynxseal-nav .nav-item { margin-left: 2rem; margin-right: 2rem; }
+  .lynxseal-nav .nav-link,
+  .lynxseal-nav a.text-dark,
+  .lynxseal-nav a.this-page,
+  .lynxseal-nav li.this-page > button[type=submit] {
+    position: relative;
+    padding: 0rem !important;
+    margin: .5rem .5rem;
+  }
+  .lynxseal-nav .nav-link:hover,
+  .lynxseal-nav a.text-dark:hover,
+  .lynxseal-nav .this-page,
+  .lynxseal-nav a.this-page,
+  .lynxseal-nav li.this-page button[type=submit] { color: #005695 !important; }
+  .lynxseal-nav a.text-dark:hover::after,
+  .lynxseal-nav .nav-link:hover::after,
+  .lynxseal-nav a.this-page::after,
+  .lynxseal-nav li.this-page button[type=submit]::after {
+    position: absolute; left: 0; bottom: -0.7rem; width: 100%; height: 1px;
+    border-bottom: 3.4px solid #005695; content: "";
+  }
+  .lynxseal-nav .nav-link,
+  .lynxseal-nav a.text-dark {
+    font-size: 16px !important; color: #333338 !important; font-weight: 600 !important;
+  }
+  body.lynxseal-auth .lynxseal-anon-only { display: none; }
+  body.lynxseal-anon .lynxseal-auth-only { display: none; }
+</style>
+<header class="lynxseal-nav">
+  <nav class="navbar navbar-expand-sm navbar-toggleable-sm navbar-light bg-white border-bottom box-shadow mb-3">
+    <div class="container">
+      <a class="navbar-brand" href="https://stibc.org" style="margin-bottom:1rem;margin-top:2.5rem;margin-left:1rem">
+        <img alt="STIBC logo" src="/stibc-logo.png" width="288" height="130">
+      </a>
+      <div class="navbar-collapse collapse d-sm-inline-flex justify-content-between">
+        <ul class="navbar-nav">
+          <li class="nav-item"><a class="nav-link text-dark" href="https://stibc.org">&lt; BACK TO MAIN SITE</a></li>
+          <li class="nav-item"><a class="nav-link text-dark" href="/">VERIFY A DOCUMENT</a></li>
+        </ul>
+      </div>
+    </div>
   </nav>
 </header>
 `;
