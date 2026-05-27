@@ -59,17 +59,25 @@ async function handleRequest(request, url) {
     return new Response('SW proxy error: ' + (e && e.message), { status: 502, headers: { 'Content-Type': 'text/plain' } });
   }
 
-  // For HTML responses, splice in the STIBC header right after <body>.
-  // Everything else passes through as-is.
+  // Always rebuild as a fresh Response. If we returned `upstream` directly,
+  // its .url would be the portal-origin URL the SW fetched (e.g.
+  // https://portal.lynxseal.com/css/site.css), and the browser would
+  // enforce CSP against THAT instead of the request URL the page asked
+  // for. Wrapping in a new Response clears .url so CSP sees a same-origin
+  // resource (which 'self' matches).
   const contentType = upstream.headers.get('Content-Type') || '';
-  if (!contentType.includes('text/html')) return upstream;
-
-  const text = await upstream.text();
-  const wrapped = text.replace(/<body([^>]*)>/i, '<body$1>' + HEADER_HTML);
-
   const headers = new Headers(upstream.headers);
-  headers.set('Content-Type', 'text/html; charset=utf-8');
-  return new Response(wrapped, { status: upstream.status, statusText: upstream.statusText, headers });
+
+  if (contentType.includes('text/html')) {
+    const text = await upstream.text();
+    const wrapped = text.replace(/<body([^>]*)>/i, '<body$1>' + HEADER_HTML);
+    headers.set('Content-Type', 'text/html; charset=utf-8');
+    return new Response(wrapped, { status: upstream.status, statusText: upstream.statusText, headers });
+  }
+
+  // Non-HTML: still wrap in a fresh Response so .url doesn't leak portal origin.
+  const body = await upstream.arrayBuffer();
+  return new Response(body, { status: upstream.status, statusText: upstream.statusText, headers });
 }
 
 // Header markup spliced into every HTML response. Includes a small <script>
