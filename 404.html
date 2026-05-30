@@ -3,7 +3,7 @@
   GitHub Pages 404 fallback — served for every path on this wrapper origin
   until the service worker installs. Once /sw.js is registered and active,
   every subsequent request gets intercepted and proxied to portal.lynxseal.com
-  with the STIBC header injected; this bootstrap HTML never renders again.
+  with tenant globals injected; this bootstrap HTML never renders again.
 
   No iframe, no postMessage — the SW makes the portal appear same-origin.
 -->
